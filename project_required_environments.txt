@@ -1,0 +1,13 @@
+dev (backend)
+development (frontend)
+Python 3.12+
+Node.js 20
+pnpm
+FastAPI
+LiteLLM
+SQLite
+Redis
+Docker
+Docker Compose
+E2B (optional)
+OpenAlex (optional)
