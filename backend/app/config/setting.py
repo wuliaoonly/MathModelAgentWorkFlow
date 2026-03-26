@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     REDIS_URL: str = "redis://redis:6379/0"
     REDIS_MAX_CONNECTIONS: int = 10
+    SQLITE_URL: str = "sqlite+aiosqlite:///./data/app.db"
     CORS_ALLOW_ORIGINS: Annotated[list[str] | str, BeforeValidator(parse_cors)] = "*"
     SERVER_HOST: str = "http://localhost:8000"
     OPENALEX_EMAIL: Optional[str] = None

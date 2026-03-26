@@ -25,12 +25,16 @@ class WorkFlow:
 
 class MathModelWorkFlow(WorkFlow):
     task_id: str  #
+    project_id: str
+    run_id: str
     work_dir: str  # worklow work dir
     ques_count: int = 0  # 问题数量
     questions: dict[str, str | int] = {}  # 问题
 
     async def execute(self, problem: Problem):
         self.task_id = problem.task_id
+        self.project_id = problem.project_id or "legacy"
+        self.run_id = problem.run_id or problem.task_id
         self.work_dir = create_work_dir(self.task_id)
 
         llm_factory = LLMFactory(self.task_id)
@@ -38,9 +42,12 @@ class MathModelWorkFlow(WorkFlow):
 
         coordinator_agent = CoordinatorAgent(self.task_id, coordinator_llm)
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="识别用户意图和拆解问题ing..."),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="agent.plan",
+            message=SystemMessage(content="识别用户意图和拆解问题ing..."),
+            also_publish_legacy_task_channel=True,
         )
 
         try:
@@ -52,14 +59,20 @@ class MathModelWorkFlow(WorkFlow):
             logger.error(f"CoordinatorAgent 执行失败: {e}")
             raise e
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="识别用户意图和拆解问题完成,任务转交给建模手"),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="run.status",
+            message=SystemMessage(content="识别用户意图和拆解问题完成,任务转交给建模手"),
+            also_publish_legacy_task_channel=True,
         )
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="建模手开始建模ing..."),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="run.status",
+            message=SystemMessage(content="建模手开始建模ing..."),
+            also_publish_legacy_task_channel=True,
         )
 
         modeler_agent = ModelerAgent(self.task_id, modeler_llm)
@@ -68,9 +81,12 @@ class MathModelWorkFlow(WorkFlow):
 
         user_output = UserOutput(work_dir=self.work_dir, ques_count=self.ques_count)
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="正在创建代码沙盒环境"),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="run.status",
+            message=SystemMessage(content="正在创建代码沙盒环境"),
+            also_publish_legacy_task_channel=True,
         )
 
         notebook_serializer = NotebookSerializer(work_dir=self.work_dir)
@@ -84,14 +100,20 @@ class MathModelWorkFlow(WorkFlow):
         
         scholar = OpenAlexScholar(task_id=self.task_id, email=settings.OPENALEX_EMAIL)
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="创建完成"),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="run.status",
+            message=SystemMessage(content="创建完成"),
+            also_publish_legacy_task_channel=True,
         )
 
-        await redis_manager.publish_message(
-            self.task_id,
-            SystemMessage(content="初始化代码手"),
+        await redis_manager.publish_event(
+            project_id=self.project_id,
+            run_id=self.run_id,
+            event_type="run.status",
+            message=SystemMessage(content="初始化代码手"),
+            also_publish_legacy_task_channel=True,
         )
 
         # modeler_agent
@@ -119,27 +141,36 @@ class MathModelWorkFlow(WorkFlow):
         config_template = get_config_template(problem.comp_template)
 
         for key, value in solution_flows.items():
-            await redis_manager.publish_message(
-                self.task_id,
-                SystemMessage(content=f"代码手开始求解{key}"),
+            await redis_manager.publish_event(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                event_type="run.status",
+                message=SystemMessage(content=f"代码手开始求解{key}"),
+                also_publish_legacy_task_channel=True,
             )
 
             coder_response = await coder_agent.run(
                 prompt=value["coder_prompt"], subtask_title=key
             )
 
-            await redis_manager.publish_message(
-                self.task_id,
-                SystemMessage(content=f"代码手求解成功{key}", type="success"),
+            await redis_manager.publish_event(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                event_type="run.status",
+                message=SystemMessage(content=f"代码手求解成功{key}", type="success"),
+                also_publish_legacy_task_channel=True,
             )
 
             writer_prompt = flows.get_writer_prompt(
                 key, coder_response.code_response, code_interpreter, config_template
             )
 
-            await redis_manager.publish_message(
-                self.task_id,
-                SystemMessage(content=f"论文手开始写{key}部分"),
+            await redis_manager.publish_event(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                event_type="run.status",
+                message=SystemMessage(content=f"论文手开始写{key}部分"),
+                also_publish_legacy_task_channel=True,
             )
 
             ## TODO: 图片引用错误
@@ -149,9 +180,12 @@ class MathModelWorkFlow(WorkFlow):
                 sub_title=key,
             )
 
-            await redis_manager.publish_message(
-                self.task_id,
-                SystemMessage(content=f"论文手完成{key}部分"),
+            await redis_manager.publish_event(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                event_type="run.status",
+                message=SystemMessage(content=f"论文手完成{key}部分"),
+                also_publish_legacy_task_channel=True,
             )
 
             user_output.set_res(key, writer_response)
@@ -167,9 +201,12 @@ class MathModelWorkFlow(WorkFlow):
             user_output, config_template, problem.ques_all
         )
         for key, value in write_flows.items():
-            await redis_manager.publish_message(
-                self.task_id,
-                SystemMessage(content=f"论文手开始写{key}部分"),
+            await redis_manager.publish_event(
+                project_id=self.project_id,
+                run_id=self.run_id,
+                event_type="run.status",
+                message=SystemMessage(content=f"论文手开始写{key}部分"),
+                also_publish_legacy_task_channel=True,
             )
 
             writer_response = await writer_agent.run(prompt=value, sub_title=key)

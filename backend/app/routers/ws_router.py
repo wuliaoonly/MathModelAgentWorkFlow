@@ -6,27 +6,28 @@ from app.services.ws_manager import ws_manager
 from app.utils.log_util import logger
 import json
 from pathlib import Path
+from app.db.database import AsyncSessionLocal
+from app.db.repositories import MessageRepository
 
 router = APIRouter()
 
 
-async def send_history_messages(websocket: WebSocket, task_id: str):
+async def send_history_messages_from_db(
+    websocket: WebSocket, *, project_id: str, run_id: str
+):
     """
     发送历史消息到 WebSocket（用于重连时恢复消息）
     """
     try:
-        messages_file = Path("logs/messages") / f"{task_id}.json"
-        
-        if not messages_file.exists():
-            logger.info(f"任务 {task_id} 没有历史消息文件")
-            return
-        
-        with open(messages_file, "r", encoding="utf-8") as f:
-            messages = json.load(f)
-        
-        logger.info(f"🔄 开始发送 {len(messages)} 条历史消息到 WebSocket")
-        
-        # 逐条发送历史消息
+        async with AsyncSessionLocal() as session:
+            messages = await MessageRepository(session).list_by_run(
+                project_id=project_id, run_id=run_id, limit=5000
+            )
+
+        logger.info(
+            f"🔄 开始发送 {len(messages)} 条历史消息到 WebSocket (project={project_id}, run={run_id})"
+        )
+
         for msg in messages:
             if ws_manager.is_connected(websocket):
                 await ws_manager.send_personal_message_json(msg, websocket)
@@ -40,6 +41,62 @@ async def send_history_messages(websocket: WebSocket, task_id: str):
     except Exception as e:
         logger.error(f"发送历史消息失败: {e}")
         # 不抛出异常，继续正常流程
+
+
+@router.websocket("/ws/projects/{project_id}/runs/{run_id}")
+async def websocket_project_run(websocket: WebSocket, project_id: str, run_id: str):
+    logger.info(f"WebSocket 尝试连接 project_id={project_id} run_id={run_id}")
+
+    pubsub = None
+    try:
+        # 建立 WebSocket 连接
+        await ws_manager.connect(websocket)
+        websocket.timeout = 500
+
+        # 先发历史（SQLite）
+        await send_history_messages_from_db(
+            websocket, project_id=project_id, run_id=run_id
+        )
+
+        # 订阅 Redis run 事件流
+        pubsub = await redis_manager.subscribe_to_run(run_id)
+        logger.info(f"Subscribed to Redis channel: run:{run_id}:events")
+
+        while ws_manager.is_connected(websocket):
+            try:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=0.1
+                )
+                if msg and msg.get("data"):
+                    try:
+                        msg_dict = json.loads(msg["data"])
+                        await ws_manager.send_personal_message_json(msg_dict, websocket)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON 解析错误: {e}, 原始数据: {msg.get('data')}")
+
+                await asyncio.sleep(0.1)
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket 客户端主动断开连接: run_id={run_id}")
+                break
+            except asyncio.CancelledError:
+                logger.info(f"WebSocket 任务被取消: run_id={run_id}")
+                break
+            except Exception as e:
+                logger.error(f"WebSocket 循环中出错: {e}")
+                if not ws_manager.is_connected(websocket):
+                    break
+                await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket 断开连接: run_id={run_id}")
+    except Exception as e:
+        logger.error(f"WebSocket 错误: {e}", exc_info=True)
+    finally:
+        if pubsub:
+            try:
+                await pubsub.unsubscribe(f"run:{run_id}:events")
+            except Exception:
+                pass
+        ws_manager.disconnect(websocket)
 
 
 @router.websocket("/task/{task_id}")
@@ -71,8 +128,20 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
         websocket.timeout = 500
         logger.info(f"WebSocket connection status: {websocket.client}")
 
-        # 🔥 关键修复：先发送所有历史消息（重连时恢复）
-        await send_history_messages(websocket, task_id)
+        # 先发送所有历史消息（重连时恢复）：优先从 SQLite（legacy project/run），失败再回退文件
+        try:
+            mapped_project_id = None
+            try:
+                redis_async_client = await redis_manager.get_client()
+                mapped_project_id = await redis_async_client.get(f"run_project:{task_id}")
+            except Exception:
+                mapped_project_id = None
+
+            await send_history_messages_from_db(
+                websocket, project_id=mapped_project_id or "legacy", run_id=task_id
+            )
+        except Exception:
+            pass
 
         # 订阅 Redis 频道（订阅后才能接收新消息）
         pubsub = await redis_manager.subscribe_to_task(task_id)

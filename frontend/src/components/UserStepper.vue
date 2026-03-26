@@ -140,17 +140,25 @@ const handleSubmit = async () => {
       uploadedFiles.value
     )
 
-    taskId.value = response?.data?.task_id ?? null
+    const projectId = response?.data?.project_id
+    const runId = response?.data?.run_id
+    taskId.value = response?.data?.task_id ?? runId ?? null
     taskStore.addUserMessage(question.value)
 
     showSubmitSuccess.value = true
     setTimeout(() => {
       showSubmitSuccess.value = false // 3秒后自动隐藏
     }, 3000)
-    router.push(`/task/${taskId.value}`)
+    if (projectId && runId) {
+      router.push(`/projects/${projectId}/runs/${runId}`)
+    } else {
+      router.push(`/task/${taskId.value}`)
+    }
     toast({
       title: '任务提交成功',
-      description: '任务提交成功，编号为：' + taskId.value,
+      description: projectId && runId
+        ? `任务提交成功，project=${projectId} run=${runId}`
+        : '任务提交成功，编号为：' + taskId.value,
     })
   } catch (error) {
     console.error('任务提交失败:', error)

@@ -7,6 +7,7 @@ from app.utils.log_util import logger
 from app.config.setting import settings
 from fastapi.staticfiles import StaticFiles
 from app.utils.cli import get_ascii_banner, center_cli_str
+from app.db.init_db import init_db
 
 
 @asynccontextmanager
@@ -17,6 +18,13 @@ async def lifespan(app: FastAPI):
 
     PROJECT_FOLDER = "./project"
     os.makedirs(PROJECT_FOLDER, exist_ok=True)
+    os.makedirs("./data", exist_ok=True)
+
+    try:
+        await init_db()
+        logger.info("SQLite tables initialized")
+    except Exception as e:
+        logger.error(f"SQLite init failed: {e}")
 
     yield
     logger.info("Stopping MathModelAgent")

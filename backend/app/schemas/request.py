@@ -8,6 +8,8 @@ class ExampleRequest(BaseModel):
 
 
 class Problem(BaseModel):
+    project_id: str | None = None
+    run_id: str | None = None
     task_id: str
     ques_all: str = ""
     comp_template: CompTemplate = CompTemplate.CHINA

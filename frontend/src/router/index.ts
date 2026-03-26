@@ -21,6 +21,11 @@ const routes = [
 		component: () => import("@/pages/task/index.vue"),
 		props: true,
 	},
+	{
+		path: "/projects/:project_id/runs/:run_id",
+		component: () => import("@/pages/task/index.vue"),
+		props: true,
+	},
 ];
 
 // 创建路由

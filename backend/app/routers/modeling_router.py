@@ -20,6 +20,7 @@ from pydantic import BaseModel
 import litellm
 from app.config.setting import settings
 import requests
+from uuid import uuid4
 
 router = APIRouter()
 
@@ -155,8 +156,10 @@ async def exampleModeling(
     example_request: ExampleRequest,
     background_tasks: BackgroundTasks,
 ):
-    task_id = create_task_id()
-    work_dir = create_work_dir(task_id)
+    project_id = str(uuid4())
+    run_id = create_task_id()
+    task_id = run_id  # legacy 兼容
+    work_dir = create_work_dir(run_id)
     example_dir = os.path.join("app", "example", "example", example_request.source)
     ic(example_dir)
     with open(os.path.join(example_dir, "questions.txt"), "r", encoding="utf-8") as f:
@@ -168,19 +171,27 @@ async def exampleModeling(
         dst_file = os.path.join(work_dir, file)
         with open(src_file, "rb") as src, open(dst_file, "wb") as dst:
             dst.write(src.read())
-    # 存储任务ID
+    # 存储 legacy task_id 与 run_id
     await redis_manager.set(f"task_id:{task_id}", task_id)
+    await redis_manager.set(f"run_id:{run_id}", run_id)
+    await redis_manager.set(f"run_project:{run_id}", project_id)
 
     logger.info(f"Adding background task for task_id: {task_id}")
     # 将任务添加到后台执行
     background_tasks.add_task(
         run_modeling_task_async,
-        task_id,
+        project_id,
+        run_id,
         ques_all,
         CompTemplate.CHINA,
         FormatOutPut.Markdown,
     )
-    return {"task_id": task_id, "status": "processing"}
+    return {
+        "project_id": project_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "status": "processing",
+    }
 
 
 @router.post("/modeling")
@@ -191,8 +202,10 @@ async def modeling(
     format_output: FormatOutPut = Form(...),  # 从表单获取
     files: list[UploadFile] = File(default=None),
 ):
-    task_id = create_task_id()
-    work_dir = create_work_dir(task_id)
+    project_id = str(uuid4())
+    run_id = create_task_id()
+    task_id = run_id  # legacy 兼容
+    work_dir = create_work_dir(run_id)
 
     # 如果有上传文件，保存文件
     if files:
@@ -224,26 +237,37 @@ async def modeling(
     else:
         logger.warning("没有上传文件")
 
-    # 存储任务ID
+    # 存储 legacy task_id 与 run_id
     await redis_manager.set(f"task_id:{task_id}", task_id)
+    await redis_manager.set(f"run_id:{run_id}", run_id)
+    await redis_manager.set(f"run_project:{run_id}", project_id)
 
     logger.info(f"Adding background task for task_id: {task_id}")
     # 将任务添加到后台执行
     background_tasks.add_task(
-        run_modeling_task_async, task_id, ques_all, comp_template, format_output
+        run_modeling_task_async, project_id, run_id, ques_all, comp_template, format_output
     )
-    return {"task_id": task_id, "status": "processing"}
+    return {
+        "project_id": project_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "status": "processing",
+    }
 
 
 async def run_modeling_task_async(
-    task_id: str,
+    project_id: str,
+    run_id: str,
     ques_all: str,
     comp_template: CompTemplate,
     format_output: FormatOutPut,
 ):
-    logger.info(f"run modeling task for task_id: {task_id}")
+    task_id = run_id  # legacy 兼容：workflow/work_dir 仍以 task_id 命名
+    logger.info(f"run modeling task for project_id={project_id} run_id={run_id}")
 
     problem = Problem(
+        project_id=project_id,
+        run_id=run_id,
         task_id=task_id,
         ques_all=ques_all,
         comp_template=comp_template,
@@ -251,9 +275,12 @@ async def run_modeling_task_async(
     )
 
     # 发送任务开始状态
-    await redis_manager.publish_message(
-        task_id,
-        SystemMessage(content="任务开始处理"),
+    await redis_manager.publish_event(
+        project_id=project_id,
+        run_id=run_id,
+        event_type="run.status",
+        message=SystemMessage(content="任务开始处理"),
+        also_publish_legacy_task_channel=True,
     )
 
     # 给一个短暂的延迟，确保 WebSocket 有机会连接
@@ -265,9 +292,12 @@ async def run_modeling_task_async(
     await asyncio.wait_for(task, timeout=3600 * 5)
 
     # 发送任务完成状态
-    await redis_manager.publish_message(
-        task_id,
-        SystemMessage(content="任务处理完成", type="success"),
+    await redis_manager.publish_event(
+        project_id=project_id,
+        run_id=run_id,
+        event_type="run.status",
+        message=SystemMessage(content="任务处理完成", type="success"),
+        also_publish_legacy_task_channel=True,
     )
     # 转换md为docx
     md_2_docx(task_id)

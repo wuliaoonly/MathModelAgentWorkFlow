@@ -23,7 +23,7 @@ import FilesSheet from '@/pages/task/components/FileSheet.vue'
 const { toast } = useToast()
 
 
-const props = defineProps<{ task_id: string }>()
+const props = defineProps<{ task_id?: string; project_id?: string; run_id?: string }>()
 const taskStore = useTaskStore()
 
 const writerSequence = ref<string[]>([]);
@@ -59,7 +59,12 @@ const updateDuration = () => {
 console.log('Task ID:', props.task_id)
 
 onMounted(async () => {
-  taskStore.connectWebSocket(props.task_id)
+  // project/run 优先；旧路由仍可用
+  if (props.project_id && props.run_id) {
+    taskStore.connectWebSocket({ projectId: props.project_id, runId: props.run_id })
+  } else if (props.task_id) {
+    taskStore.connectWebSocket({ taskId: props.task_id })
+  }
   const res = await getWriterSeque();
   writerSequence.value = Array.isArray(res.data) ? res.data : [];
 

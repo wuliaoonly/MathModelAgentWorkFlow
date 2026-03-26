@@ -26,7 +26,9 @@ export function submitModelingTask(
 		}
 
 		return request.post<{
-			task_id: string;
+			project_id: string;
+			run_id: string;
+			task_id: string; // legacy
 			status: string;
 		}>("/modeling", formData, {
 			headers: {

@@ -32,8 +32,10 @@ dependencies = [
     "seaborn>=0.13.2",
     "semanticscholar>=0.10.0",
     "shap>=0.47.2",
+    "sqlalchemy>=2.0.43",
     "statsmodels>=0.14.4",
     "uvicorn[standard]>=0.34.0",
+    "aiosqlite>=0.21.0",
     "websocket>=0.2.1",
     "xgboost>=3.0.0",
 ]

@@ -5,6 +5,12 @@ from pathlib import Path
 from app.config.setting import settings
 from app.schemas.response import Message
 from app.utils.log_util import logger
+from uuid import uuid4
+from datetime import datetime
+from typing import Any, Optional
+
+from app.db.database import AsyncSessionLocal
+from app.db.repositories import MessageRepository, RunRepository, RunUpsert
 
 
 class RedisManager:
@@ -65,7 +71,7 @@ class RedisManager:
             # 不抛出异常，确保主流程不受影响
 
     async def publish_message(self, task_id: str, message: Message):
-        """发布消息到特定任务的频道并保存到文件"""
+        """兼容旧接口：发布消息到 task 频道，并写文件 + SQLite（作为 legacy run）"""
         client = await self.get_client()
         channel = f"task:{task_id}:messages"
         try:
@@ -76,9 +82,100 @@ class RedisManager:
             )
             # 保存消息到文件
             await self._save_message_to_file(task_id, message)
+
+            # 同时发布到新的 run 频道，并落库（project/run 模式：优先从 Redis 取 project_id 映射）
+            try:
+                mapped_project_id = await client.get(f"run_project:{task_id}")
+            except Exception:
+                mapped_project_id = None
+
+            project_id = mapped_project_id or "legacy"
+            await self.publish_event(
+                project_id=project_id,
+                run_id=task_id,
+                event_type="agent.chunk" if message.msg_type != "system" else "run.status",
+                message=message,
+                trace_id=None,
+                agent=None,
+                also_publish_legacy_task_channel=False,
+            )
         except Exception as e:
             logger.error(f"发布消息失败: {str(e)}")
             raise
+
+    async def publish_event(
+        self,
+        *,
+        project_id: str,
+        run_id: str,
+        event_type: str,
+        message: Message,
+        trace_id: Optional[str] = None,
+        agent: Optional[str] = None,
+        payload: Optional[dict[str, Any]] = None,
+        also_publish_legacy_task_channel: bool = False,
+    ) -> dict[str, Any]:
+        """
+        新接口：以 project/run 为维度发布事件（Redis 流式）并写入 SQLite（历史）。
+        兼容要求：顶层仍保留 msg_type/content/agent_type/tool_name 等字段。
+        """
+        client = await self.get_client()
+        event_id = str(uuid4())
+        payload = payload or {}
+
+        envelope: dict[str, Any] = {
+            # 兼容旧前端字段
+            **message.model_dump(),
+            # 新字段
+            "event_id": event_id,
+            "trace_id": trace_id,
+            "project_id": project_id,
+            "run_id": run_id,
+            "event_type": event_type,
+            "agent": agent,
+            "payload": payload,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # 1) Redis publish（流式）
+        run_channel = f"run:{run_id}:events"
+        await client.publish(run_channel, json.dumps(envelope, ensure_ascii=False))
+
+        # 可选：同时发布旧 task 频道，方便渐进迁移
+        if also_publish_legacy_task_channel:
+            legacy_channel = f"task:{run_id}:messages"
+            await client.publish(legacy_channel, json.dumps(envelope, ensure_ascii=False))
+
+        # 2) SQLite append（历史）
+        try:
+            async with AsyncSessionLocal() as session:
+                await RunRepository(session).upsert(
+                    RunUpsert(project_id=project_id, run_id=run_id, status="running")
+                )
+                await MessageRepository(session).append_event(
+                    id=event_id,
+                    project_id=project_id,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    event_type=event_type,
+                    agent=agent,
+                    msg_type=getattr(message, "msg_type", None),
+                    agent_type=getattr(message, "agent_type", None),
+                    tool_name=getattr(message, "tool_name", None),
+                    content=getattr(message, "content", None),
+                    payload=envelope,
+                )
+        except Exception as e:
+            logger.error(f"SQLite 追加历史消息失败（不阻断主流程）: {e}")
+
+        return envelope
+
+    async def subscribe_to_run(self, run_id: str):
+        """订阅特定 run 的事件流"""
+        client = await self.get_client()
+        pubsub = client.pubsub()
+        await pubsub.subscribe(f"run:{run_id}:events")
+        return pubsub
 
     async def subscribe_to_task(self, task_id: str):
         """订阅特定任务的消息"""
