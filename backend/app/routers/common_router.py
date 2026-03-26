@@ -8,6 +8,10 @@ from app.utils.common_utils import get_config_template
 from app.schemas.enums import CompTemplate
 from app.services.redis_manager import redis_manager
 from app.utils.log_util import logger
+from app.db.database import AsyncSessionLocal
+from app.db.models import Run
+from sqlalchemy import select
+from fastapi import Query
 
 router = APIRouter()
 
@@ -164,6 +168,81 @@ async def get_tasks_list(limit: int = 50):
     except Exception as e:
         logger.error(f"获取任务列表失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get tasks list: {str(e)}")
+
+
+@router.get("/api/projects")
+async def get_projects(limit: int = Query(10, ge=1, le=100)):
+    """
+    最近项目列表：从 SQLite `runs` 表推导最近一次 run。
+    只读接口，最小可用响应用于前端“最近 runs”回放列表。
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            # 取更多 run 后再去重，避免 distinct + 聚合写法带来的复杂度
+            stmt = select(Run).order_by(Run.created_at.desc()).limit(limit * 5)
+            rows = (await session.execute(stmt)).scalars().all()
+
+        latest_by_project: dict[str, Run] = {}
+        for r in rows:
+            if r.project_id not in latest_by_project:
+                latest_by_project[r.project_id] = r
+
+        projects = [
+            {
+                "project_id": pid,
+                "latest_run": {
+                    "run_id": r.run_id,
+                    "status": r.status,
+                    "title": r.title,
+                    "created_at": int(r.created_at.timestamp() * 1000),
+                },
+            }
+            for pid, r in latest_by_project.items()
+        ]
+        projects.sort(
+            key=lambda x: x["latest_run"]["created_at"] or 0, reverse=True
+        )
+        projects = projects[:limit]
+        return {"projects": projects}
+    except Exception as e:
+        logger.error(f"获取 projects 失败: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get projects: {str(e)}"
+        )
+
+
+@router.get("/api/projects/{project_id}/runs")
+async def get_project_runs(
+    project_id: str,
+    limit: int = Query(10, ge=1, le=200),
+):
+    """返回指定 project 的最近 runs（只读 runs 表）"""
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(Run)
+                .where(Run.project_id == project_id)
+                .order_by(Run.created_at.desc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+
+        runs = [
+            {
+                "run_id": r.run_id,
+                "project_id": r.project_id,
+                "status": r.status,
+                "title": r.title,
+                "created_at": int(r.created_at.timestamp() * 1000),
+            }
+            for r in rows
+        ]
+        return {"runs": runs}
+    except Exception as e:
+        logger.error(f"获取 project runs 失败: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get project runs: {str(e)}"
+        )
 
 
 @router.get("/task/{task_id}/info")
